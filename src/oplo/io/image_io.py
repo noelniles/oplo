@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple, Callable, List
+from typing import Optional, Tuple, Dict, List
 
 import numpy as np
 
-# Optional imports are done inside reader functions to avoid hard deps
-
-# --------------------------- Public API ------------------------------------
+# ---------------------------------------------------------------------------
+# ImageBundle: preserve raw data + metadata + calibration. Visualization-only
+# scaling happens via .view(...), keeping scientific data intact for analysis.
+# ---------------------------------------------------------------------------
 
 @dataclass
 class ImageMeta:
@@ -20,11 +21,44 @@ class ImageMeta:
     reader: Optional[str] = None
 
 
-def load_image(path: str | Path) -> tuple[np.ndarray, ImageMeta]:
-    """Load an image as float32 [0,1] for processing/Plotly display.
+@dataclass
+class ImageBundle:
+    data: np.ndarray            # raw array (original dtype when feasible)
+    meta: Dict                  # metadata dict (derived from ImageMeta)
+    calib: Dict                 # calibration / scaling hints (per modality)
 
-    Tries specialized readers in order. Keeps full precision internally and
-    returns a view-scaled array only at the UI layer.
+    def view(
+        self,
+        policy: str = "dtype_range",
+        lo: float = 0.5,
+        hi: float = 99.5,
+        window_center: Optional[float] = None,
+        window_width: Optional[float] = None,
+        gamma: float = 1.0,
+    ) -> np.ndarray:
+        """Return a float32 image in [0,1] for visualization only.
+        Supports multiple policies; default is dtype-range scaling.
+        """
+        return to_unit_view(
+            self.data,
+            self.meta,
+            self.calib,
+            policy=policy,
+            lo=lo,
+            hi=hi,
+            window_center=window_center,
+            window_width=window_width,
+            gamma=gamma,
+        )
+
+
+# --------------------------- Public API ------------------------------------
+
+def load_image(path: str | Path) -> ImageBundle:
+    """Load an image and return an ImageBundle (raw + meta + calib).
+
+    Current working readers: TIFF (tifffile) and PNG/JPEG/BMP (Pillow).
+    Other formats are scaffolded for future implementation.
     """
     p = Path(path)
 
@@ -32,12 +66,12 @@ def load_image(path: str | Path) -> tuple[np.ndarray, ImageMeta]:
         if reader.accepts(p):
             arr, meta = reader.load(p)
             meta.reader = reader.name
-            return to_float01(arr), meta
+            return ImageBundle(data=arr, meta=meta.__dict__, calib={})
 
-    # Fallback to Pillow
+    # Fallback to Pillow explicitly if none matched (shouldn’t normally happen)
     arr, meta = _PillowReader.load(p)
     meta.reader = _PillowReader.name
-    return to_float01(arr), meta
+    return ImageBundle(data=arr, meta=meta.__dict__, calib={})
 
 
 # --------------------------- TIFF (primary) --------------------------------
@@ -52,12 +86,18 @@ class _TiffReader:
     @staticmethod
     def load(p: Path) -> tuple[np.ndarray, ImageMeta]:
         import tifffile as tiff
-        # If extremely large, consider tiff.memmap or aszarr for pyramids
+        # Try normal imread first (fast for typical images). If it fails or is
+        # huge, fall back to memmap. Users with gigantic TIFFs can still open.
+        arr = None
         try:
-            arr = tiff.imread(str(p))  # preserves dtype and pages
-        except Exception as e:
-            # Try memmap as a fallback for big images
-            arr = tiff.memmap(str(p))  # lazy mapping
+            arr = tiff.imread(str(p))
+        except Exception:
+            pass
+        if arr is None:
+            try:
+                arr = tiff.memmap(str(p))  # lazy mapping
+            except Exception as e:
+                raise
         meta = ImageMeta(
             path=str(p),
             orig_dtype=str(arr.dtype),
@@ -65,10 +105,8 @@ class _TiffReader:
             colorspace="linear",
             shape=tuple(arr.shape),
         )
-        # If multi-page or multi-sample, prefer first page for now
+        # If this is a stack, just expose first page for now (viewer roadmap will add stacks)
         if arr.ndim == 3 and arr.shape[-1] not in (1, 2, 3, 4):
-            # Likely a stack: (pages, H, W) or (H, W, pages)
-            # Use first page; future: expose a timeline/slider
             arr = np.asarray(arr[0])
         return np.asarray(arr), meta
 
@@ -86,7 +124,6 @@ class _PillowReader:
     def load(p: Path) -> tuple[np.ndarray, ImageMeta]:
         from PIL import Image
         im = Image.open(p)
-        # Convert paletted/LA images to RGB or L consistently
         if im.mode in {"P", "LA"}:
             im = im.convert("RGBA" if "A" in im.mode else "RGB")
         arr = np.array(im)
@@ -100,7 +137,7 @@ class _PillowReader:
         return arr, meta
 
 
-# --------------------------- Stubs (scaffold) ------------------------------
+# --------------------------- Scaffolds (future) ----------------------------
 
 class _DicomReader:
     name = "dicom"
@@ -111,7 +148,6 @@ class _DicomReader:
 
     @staticmethod
     def load(p: Path) -> tuple[np.ndarray, ImageMeta]:
-        # Future: pydicom.dcmread(...).pixel_array
         raise NotImplementedError("DICOM reader not implemented yet")
 
 
@@ -124,7 +160,6 @@ class _RawReader:
 
     @staticmethod
     def load(p: Path) -> tuple[np.ndarray, ImageMeta]:
-        # Future: rawpy.imread(...).postprocess(..., output_bps=16, gamma=(1,1))
         raise NotImplementedError("RAW reader not implemented yet")
 
 
@@ -137,7 +172,6 @@ class _FitsReader:
 
     @staticmethod
     def load(p: Path) -> tuple[np.ndarray, ImageMeta]:
-        # Future: astropy.io.fits.open(..., memmap=True)
         raise NotImplementedError("FITS reader not implemented yet")
 
 
@@ -150,7 +184,6 @@ class _ExrReader:
 
     @staticmethod
     def load(p: Path) -> tuple[np.ndarray, ImageMeta]:
-        # Future: imagecodecs via tifffile.imread or OpenEXR (if available)
         raise NotImplementedError("EXR reader not implemented yet")
 
 
@@ -163,7 +196,6 @@ class _NpyReader:
 
     @staticmethod
     def load(p: Path) -> tuple[np.ndarray, ImageMeta]:
-        # Future: np.load(..., mmap_mode='r')
         raise NotImplementedError("NPY/NPZ reader not implemented yet")
 
 
@@ -176,26 +208,13 @@ class _Hdf5Reader:
 
     @staticmethod
     def load(p: Path) -> tuple[np.ndarray, ImageMeta]:
-        # Future: h5py.File(...)[dataset]; expose dataset picker in UI
         raise NotImplementedError("HDF5 reader not implemented yet")
 
 
-class _EventReader:
-    name = "events"
-
-    @staticmethod
-    def accepts(p: Path) -> bool:
-        return p.suffix.lower() in {".aedat", ".dat"}
-
-    @staticmethod
-    def load(p: Path) -> tuple[np.ndarray, ImageMeta]:
-        # Future: parse event stream and produce an accumulation/time-surface
-        raise NotImplementedError("Event reader not implemented yet")
-
-
-# Reader registration order: most specific/robust first
+# Reader registration order: working + specific first
 _READERS: List[object] = [
     _TiffReader,
+    _PillowReader,   # allow PNG/JPEG/BMP when TIFF not matched
     _DicomReader,
     _RawReader,
     _FitsReader,
@@ -205,25 +224,59 @@ _READERS: List[object] = [
 ]
 
 
-# --------------------------- Utilities -------------------------------------
+# --------------------------- View scaling ----------------------------------
 
-def to_float01(arr: np.ndarray) -> np.ndarray:
-    """Convert to float32 in [0,1] without destroying dynamic range semantics.
+def to_unit_view(
+    arr: np.ndarray,
+    meta: Dict,
+    calib: Dict,
+    policy: str = "dtype_range",
+    lo: float = 0.5,
+    hi: float = 99.5,
+    window_center: Optional[float] = None,
+    window_width: Optional[float] = None,
+    gamma: float = 1.0,
+) -> np.ndarray:
+    """Convert to float32 in [0,1] for visualization only.
 
-    Integers are scaled by their dtype max. Floats are clamped to [0,1].
+    policies:
+      - "dtype_range": scale uint types by dtype max; floats min-max clamp
+      - "percentile": robust scaling between given percentiles
+      - "window": (future) DICOM-style window/level using calib or args
     """
-    a = np.asarray(arr)
-    if a.dtype.kind == "f":
-        out = np.clip(a, 0.0, 1.0)
-    elif a.dtype == np.uint8:
-        out = a.astype(np.float32) / 255.0
-    elif a.dtype == np.uint16:
-        out = a.astype(np.float32) / 65535.0
-    elif a.dtype.kind in "ui":
-        maxv = float(np.iinfo(a.dtype).max)
-        out = a.astype(np.float32) / maxv
-    else:
-        # Fallback: scale by finite max
-        finite_max = float(np.nanmax(a)) if np.isfinite(a).any() else 1.0
-        out = a.astype(np.float32) / (finite_max if finite_max else 1.0)
-    return np.nan_to_num(out, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
+    x = arr
+
+    if policy == "percentile":
+        x32 = x.astype(np.float32, copy=False)
+        lo_v = float(np.percentile(x32, lo))
+        hi_v = float(np.percentile(x32, hi))
+        denom = max(hi_v - lo_v, 1e-12)
+        y = (x32 - lo_v) / denom
+
+    elif policy == "window":
+        wc = window_center if window_center is not None else calib.get("window_center")
+        ww = window_width  if window_width  is not None else calib.get("window_width")
+        if wc is None or ww is None:
+            raise ValueError("window policy requires window_center/width")
+        lo_v = wc - ww/2.0
+        hi_v = wc + ww/2.0
+        x32 = x.astype(np.float32, copy=False)
+        y = (x32 - lo_v) / max(hi_v - lo_v, 1e-12)
+
+    else:  # dtype_range
+        if x.dtype == np.uint8:
+            y = x.astype(np.float32) / 255.0
+        elif x.dtype == np.uint16:
+            y = x.astype(np.float32) / 65535.0
+        elif x.dtype.kind in "ui":
+            y = x.astype(np.float32) / float(np.iinfo(x.dtype).max)
+        else:
+            x32 = x.astype(np.float32, copy=False)
+            x_min = float(np.nanmin(x32))
+            x_max = float(np.nanmax(x32))
+            y = (x32 - x_min) / max(x_max - x_min, 1e-12)
+
+    y = np.clip(y, 0, 1)
+    if gamma != 1.0:
+        y = np.power(y, 1.0/gamma, dtype=np.float32)
+    return y.astype(np.float32, copy=False)

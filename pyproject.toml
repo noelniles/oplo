@@ -1,33 +1,58 @@
 [build-system]
-requires = ["setuptools>=88", "wheel"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "oplo"
-version = "0.1.0"
-description = "Oplo -- Optical processing learning and observation tool kit"
+version = "0.0.1"
+description = "Oplo – Open Perception & Light Observatory (interactive high-bit image viewer)"
+authors = [ { name = "Your Name" } ]
 readme = "README.md"
-requires-python = ">=3.10"
-authors = [{name = "Noel Niles}]
-license = {text = "MIT"}
-keywords = ["computer-vision", "imaging", "machine-vision", "image-processing",
-            "optics", "photometry", "scientific-imaging", "vision"]
+license = { text = "MIT" }
+requires-python = ">=3.9"
+
+# Runtime deps (loose pins; lock later with pip-compile)
 dependencies = [
-    "dash>=2.18.0",
-    "dash-bootstrap-components>=1.6.0",
-    "plotly>=5.24.1",
-    "numpy>=1.26",
-    "pillow>=10.4.0",
-    "tifffile>=2024.8.30",
-    "imagecodecs>=2024.1.1; platform_system != 'Windows', platform_machine != 'aarch64'",
-    "pydicom>=2.4.4",
-    "rawpy>=0.19.0",
-    "astropy>=6.0.0",
-    "opencv-contrib-python>=4.12.0"
+    "dash>=2.14",
+    "dash-bootstrap-components>=1.5",
+    "plotly>=5.18",
+    "numpy>=1.23",
+    "pillow>=10.0",
+    "tifffile>=2023.7",
+    "opencv-python-headless>=4.8",
 ]
 
-[pyproject.optional-dependencies]
-dev = ["pytest", "ruff", "mypy", "black", "pytest-dash"]
+[project.optional-dependencies]
+# extras you can install with: pip install -e .[extra]
+extra = [
+    "pydicom>=2.4",
+    "rawpy>=0.18",
+    "astropy>=6.0",
+    "imagecodecs>=2023.1",
+    "h5py>=3.10",
+]
+# dev tools: pip install -e .[dev]
+dev = [
+    "pytest>=7.0",
+    "pip-tools>=7.3",
+]
 
 [project.scripts]
-oplo = "oplo.server:main"
+oplo-dev = "oplo.server:run_dev"
+oplo-serve = "oplo.server:run_prod"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# allow assets (css, js, etc)
+oplo = ["assets/*"]
+
+[tool.black]
+line-length = 88
+
+[tool.isort]
+profile = "black"

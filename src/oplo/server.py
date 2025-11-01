@@ -1,13 +1,16 @@
 import os
+from pathlib import Path
 import dash
 import dash_bootstrap_components as dbc
 from .router import layout
+from oplo.pages.viewer_callbacks import register as register_viewer_callbacks
 
 
 def build_app():
     app = dash.Dash(
         __name__,
         use_pages=True,
+        pages_folder=str(Path(__file__).parent / "pages"),
         external_stylesheets=[dbc.themes.BOOTSTRAP],
         suppress_callback_exceptions=True,
         serve_locally=True,
@@ -21,17 +24,20 @@ def build_app():
 
     # Optional: limit in-memory form parsing (Werkzeug). If unset, Werkzeug defaults apply.
     # app.server.config["MAX_FORM_MEMORY_SIZE"] = app.server.config["MAX_CONTENT_LENGTH"]
-    app.layout = layout
+    app.layout = layout()
+
+    register_viewer_callbacks(app)
+
     return app
 
-def dev():
+def run_dev():
     app = build_app()
-    app.run_server(debug=True, port=8050)
+    app.run(debug=True, port=8050)
 
-def prod():
+def run_prod():
     bind = os.getenv("OPLO_BIND", "127.0.0.1:8050") # e.g. 0.0.0.0:8050 for lab-wide.
     host, port = bind.split(":")
     app = build_app()
-    app.run_server(host=host, port=int(port), debug=False)
+    app.run(host=host, port=int(port), debug=False)
 
 app = build_app()
