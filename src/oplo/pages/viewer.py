@@ -53,6 +53,18 @@ layout = dbc.Container([
                         className="mb-2"
                     ),
 
+                    # ROI mode switch
+                    dbc.Switch(id="roi-mode", value=False, label="ROI mode", className="mb-2"),
+                    html.Div(id="roi-hint",className="text-muted", style={"FontSize": "12px"}),
+
+                    dbc.Card([
+                        dbc.CardHeader("ROI Stats"),
+                        dbc.CardBody([
+                            html.Pre(id="roi-stats", style={"fontSize": "12px", "whiteSpace": "pre-wrap"}),
+                            dcc.Graph(id="roi-hist", style={"height": "2-vh"}),
+                        ])
+                    ], className="mb-3"),
+
                     # Colormap
                     dcc.Dropdown(
                         id="colormap",
