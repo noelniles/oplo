@@ -1,11 +1,7 @@
 # src/oplo/pages/viewer_callbacks.py
 from __future__ import annotations
 
-import base64, tempfile
-import uuid
-import threading
-import time
-import importlib
+import base64, os, tempfile
 from typing import NamedTuple, Dict
 
 import numpy as np
@@ -806,17 +802,34 @@ def register(app):
         # -- Load uploaded image into ImageBundle if a new upload happened --
         is_new_upload = (triggered == "upload-image") and (contents is not None) and bool(filename)
         if is_new_upload:
-            header, b64 = contents.split(",", 1)
+            STORE.clear()
+            _, b64 = contents.split(",", 1)
             data = base64.b64decode(b64)
             suffix = "." + filename.split(".")[-1] if "." in filename else ""
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-            tmp.write(data); tmp.flush(); tmp.close()
-            bundle = load_image(tmp.name)
-            # Initialize history with original image
-            STORE.set(history=[], history_index=-1)
-            STORE.push_history(bundle, f"Original: {filename}")
-            # reset slice index for new uploads
-            STORE.set(slice_index=0)
+            try:
+                tmp.write(data)
+                tmp.flush()
+                tmp.close()
+                bundle = load_image(tmp.name)
+            except ValueError as err:
+                STORE.clear()
+                err_note = html.Div(str(err), className="text-danger")
+                return no_update, err_note, no_update, err_note, no_update
+            except Exception as err:
+                STORE.clear()
+                err_note = html.Div(f"Failed to load image: {err}", className="text-danger")
+                return no_update, err_note, no_update, err_note, no_update
+            finally:
+                try:
+                    tmp.close()
+                except Exception:
+                    pass
+                try:
+                    os.unlink(tmp.name)
+                except OSError:
+                    pass
+            STORE.set(bundle=bundle)
         else:
             if STORE.get("bundle") is None:
                 return no_update, no_update, no_update, no_update, no_update
@@ -827,11 +840,62 @@ def register(app):
         policy = "percentile" if ("auto" in (autos or [])) else "dtype_range"
         gamma = gamma or 1.0
 
-        # render default slice (0) and get display array
-        fig, meta_ul, hfig, note, disp_arr = _render_bundle_view(
-            bundle, 0, policy, gamma, cmap, showbar, roi_on, crosshair_on, filename=filename
-        )
-        STORE.set(disp=disp_arr)
+        # Downsample for display
+        disp = _maybe_downsample_for_display(tonemapped, DISPLAY_MAX)
+        STORE.set(disp=disp.disp, scale=disp.scale)
+
+        # Handle single-channel vs RGB logic
+        img_disp = disp.disp  # display version (float32)
+        if img_disp.ndim == 3 and img_disp.shape[2] == 1:
+            img_disp = np.squeeze(img_disp, axis=2)
+
+        is_single = img_disp.ndim == 2
+        is_rgb = (img_disp.ndim == 3 and img_disp.shape[2] in (3, 4))
+        cmap_name = _COLORMAPS.get(cmap or "gray", "gray")
+
+        if is_single:
+            fig = px.imshow(
+                img_disp, origin="upper",
+                zmin=0.0, zmax=1.0,
+                color_continuous_scale=cmap_name,
+            )
+            fig.update_layout(coloraxis_showscale=bool(showbar))
+        elif is_rgb:
+            fig = px.imshow(img_disp, origin="upper", zmin=0.0, zmax=1.0)
+        else:
+            fig = px.imshow(
+                img_disp, origin="upper",
+                zmin=0.0, zmax=1.0,
+                color_continuous_scale=cmap_name,
+            )
+
+        # Keep margins tidy and spikes on; most importantly, preserve ROI dragmode
+        fig.update_layout(margin=dict(l=0, r=0, t=0, b=0))
+        fig.update_xaxes(showspikes=True); fig.update_yaxes(showspikes=True)
+        fig.update_layout(dragmode=("select" if roi_on else "zoom"))
+
+        # Metadata
+        meta = bundle.meta
+        h, w = bundle.data.shape[:2]
+        ch = 1 if bundle.data.ndim == 2 else bundle.data.shape[2]
+        meta_ul = html.Ul([
+            html.Li(f"File: {meta.get('path') or filename}"),
+            html.Li(f"Original dtype: {meta.get('orig_dtype')}"),
+            html.Li(f"Bit depth: {meta.get('bit_depth')}"),
+            html.Li(f"Colorspace: {meta.get('colorspace')}"),
+            html.Li(f"Size: {w} × {h} × {ch}"),
+            html.Li(f"Reader: {meta.get('reader')}"),
+        ])
+
+        # Histogram
+        hist_src = img_disp if is_single else np.clip(img_disp, 0, 1).astype(np.float32)
+        hfig = px.histogram(hist_src.ravel(), nbins=256)
+        hfig.update_layout(margin=dict(l=0, r=0, t=0, b=0), bargap=0)
+
+        # Downsample note
+        note = None
+        if disp.scale < 1.0:
+            note = html.Div(f"Downsampled for view: scale={disp.scale:.3f} (max {DISPLAY_MAX}px)")
 
         # Clear selectedData only on NEW upload; otherwise leave selection intact
         selected_reset = None if is_new_upload else no_update
@@ -866,8 +930,9 @@ def register(app):
     def roi_stats(selected, fig_state):
         bundle: ImageBundle = STORE.get("bundle")
         disp = STORE.get("disp")
+        scale = STORE.get("scale", 1.0)
         if bundle is None or disp is None or not selected:
-            return no_update, no_update, no_update, ""
+            return no_update, no_update, "Enable ROI mode and drag a selection on the image."
 
         rng = selected.get("range")
         if not rng or "x" not in rng or "y" not in rng:
@@ -884,8 +949,11 @@ def register(app):
         else:
             img = bundle.data
         img_h, img_w = img.shape[:2]
-        scale_x = disp_w / img_w
-        scale_y = disp_h / img_h
+        if scale <= 0:
+            scale_x = disp_w / img_w
+            scale_y = disp_h / img_h
+        else:
+            scale_x = scale_y = scale
 
         x0_i = max(0, min(img_w - 1, int(np.floor(min(x0, x1) / scale_x))))
         x1_i = max(0, min(img_w,     int(np.ceil (max(x0, x1) / scale_x))))
@@ -906,7 +974,9 @@ def register(app):
 
         roi_flat = roi_scalar.ravel().astype(np.float64, copy=False)
         if roi_flat.size == 0:
-            return no_update, "Empty selection.", no_update, ""
+            return "Empty selection.", no_update, ""
+        if np.all(np.isnan(roi_flat)):
+            return "ROI contains only NaN values.", no_update, ""
 
         count = int(roi_flat.size)
         vmin  = float(np.nanmin(roi_flat))
@@ -1019,6 +1089,7 @@ def register(app):
     def hover(hover):
         bundle: ImageBundle = STORE.get("bundle")
         disp = STORE.get("disp")
+        scale = STORE.get("scale", 1.0)
         if not hover or bundle is None or disp is None:
             return no_update
 
@@ -1031,8 +1102,11 @@ def register(app):
         disp_h, disp_w = disp.shape[:2]
         img_h, img_w = img.shape[:2]
 
-        scale_x = disp_w / img_w
-        scale_y = disp_h / img_h
+        if scale <= 0:
+            scale_x = disp_w / img_w
+            scale_y = disp_h / img_h
+        else:
+            scale_x = scale_y = scale
 
         pt = hover["points"][0]
         x = int(round(pt["x"] / scale_x))

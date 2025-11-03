@@ -1,55 +1,41 @@
 # src/oplo/state.py
 from typing import Any, Dict
 
+import uuid
+from flask import has_request_context, session
+
 class Store:
     def __init__(self):
-        # bundle: ImageBundle (raw, meta, calib)
-        # disp: np.ndarray (float32 [0,1] downsampled for display)
-        # history: list of (bundle, label) tuples for stepping through processing stages
-        # history_index: current position in history
-        self.data: Dict[str, Any] = {
-            "bundle": None, 
-            "disp": None,
-            "history": [],
-            "history_index": -1,
-        }
+        # per-session state keyed by a generated UUID stored in Flask session
+        self._sessions: Dict[str, Dict[str, Any]] = {}
+
+    def _get_session_id(self) -> str | None:
+        if not has_request_context():
+            return None
+        sid = session.get("oplo_session_id")
+        if sid is None:
+            sid = uuid.uuid4().hex
+            session["oplo_session_id"] = sid
+        if sid not in self._sessions:
+            self._sessions[sid] = {"bundle": None, "disp": None, "scale": 1.0}
+        return sid
 
     def set(self, **kwargs):
-        self.data.update(kwargs)
+        sid = self._get_session_id()
+        if sid is None:
+            raise RuntimeError("State access requires a request context")
+        self._sessions[sid].update(kwargs)
 
     def get(self, key: str, default=None):
-        return self.data.get(key, default)
-    
-    def push_history(self, bundle, label: str):
-        """Add a bundle to history stack with a label."""
-        history = self.data.get("history", [])
-        idx = self.data.get("history_index", -1)
-        # Truncate future history if we're not at the end
-        if idx >= 0 and idx < len(history) - 1:
-            history = history[:idx + 1]
-        history.append((bundle, label))
-        self.data["history"] = history
-        self.data["history_index"] = len(history) - 1
-        self.data["bundle"] = bundle
-    
-    def get_history_length(self) -> int:
-        return len(self.data.get("history", []))
-    
-    def get_history_index(self) -> int:
-        return self.data.get("history_index", -1)
-    
-    def set_history_index(self, idx: int):
-        """Navigate to a specific history index."""
-        history = self.data.get("history", [])
-        if 0 <= idx < len(history):
-            self.data["history_index"] = idx
-            self.data["bundle"] = history[idx][0]
-            return True
-        return False
-    
-    def get_history_labels(self):
-        """Get list of labels for all history items."""
-        history = self.data.get("history", [])
-        return [label for _, label in history]
+        sid = self._get_session_id()
+        if sid is None:
+            return default
+        return self._sessions.get(sid, {}).get(key, default)
+
+    def clear(self):
+        sid = self._get_session_id()
+        if sid is None:
+            return
+        self._sessions[sid] = {"bundle": None, "disp": None, "scale": 1.0}
 
 STORE = Store()

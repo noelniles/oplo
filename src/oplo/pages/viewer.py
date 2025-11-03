@@ -57,7 +57,12 @@ layout = dbc.Container([
                     ),
 
                     dbc.Switch(id="roi-mode", value=False, label="ROI mode", className="mb-2"),
-                        dbc.Switch(id="crosshair", value=True, label="Crosshair", className="mb-2"),
+                    html.Div(
+                        "Enable ROI mode, then drag a box on the image to compute stats.",
+                        id="roi-hint",
+                        className="text-muted",
+                        style={"FontSize": "12px"},
+                    ),
 
                         # Slice slider (hidden unless stack)
                         html.Div(id="slice-container", children=[
