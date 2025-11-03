@@ -24,6 +24,11 @@ def build_app():
 
     # Optional: limit in-memory form parsing (Werkzeug). If unset, Werkzeug defaults apply.
     # app.server.config["MAX_FORM_MEMORY_SIZE"] = app.server.config["MAX_CONTENT_LENGTH"]
+    secret_key = os.getenv("OPLO_SECRET_KEY") or os.getenv("SECRET_KEY")
+    if not secret_key:
+        secret_key = os.urandom(32)
+    app.server.secret_key = secret_key
+
     app.layout = layout()
 
     register_viewer_callbacks(app)
@@ -39,5 +44,4 @@ def run_prod():
     host, port = bind.split(":")
     app = build_app()
     app.run(host=host, port=int(port), debug=False)
-
 app = build_app()

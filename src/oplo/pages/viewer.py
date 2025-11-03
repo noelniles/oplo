@@ -55,7 +55,12 @@ layout = dbc.Container([
 
                     # ROI mode switch
                     dbc.Switch(id="roi-mode", value=False, label="ROI mode", className="mb-2"),
-                    html.Div(id="roi-hint",className="text-muted", style={"FontSize": "12px"}),
+                    html.Div(
+                        "Enable ROI mode, then drag a box on the image to compute stats.",
+                        id="roi-hint",
+                        className="text-muted",
+                        style={"FontSize": "12px"},
+                    ),
 
                     dbc.Card([
                         dbc.CardHeader("ROI Stats"),
