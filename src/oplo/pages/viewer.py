@@ -26,15 +26,19 @@ layout = dbc.Container([
             width=9
         ),
 
-        # Right sidebar
+        # Right sidebar (collapsible sections)
         dbc.Col([
+            # pipeline store for client-side persistence of pipeline graph
+            dcc.Store(id="pipeline-store", data=[]),
+            # selected node index for editing
+            dcc.Store(id="selected-node", data=None),
+            # intermediate store for node updates
+            dcc.Store(id="node-update", data=None),
 
-            # === Display Controls ===
-            dbc.Card([
-                dbc.CardHeader("Display"),
-                dbc.CardBody([
-
-                    # Gamma
+            # Processing controls accordion will be rendered here
+            dbc.Accordion([
+                dbc.AccordionItem([
+                    # Display controls
                     html.Div(className="mb-2", children=[
                         html.Label("Gamma", className="me-2"),
                         dcc.Slider(
@@ -45,7 +49,6 @@ layout = dbc.Container([
                         )
                     ]),
 
-                    # Auto scale checkbox
                     dcc.Checklist(
                         options=[{"label": "Auto Percentile (0.5–99.5%)", "value": "auto"}],
                         value=["auto"],
@@ -53,10 +56,18 @@ layout = dbc.Container([
                         className="mb-2"
                     ),
 
-                    # ROI mode switch
                     dbc.Switch(id="roi-mode", value=False, label="ROI mode", className="mb-2"),
-                    html.Div(id="roi-hint",className="text-muted", style={"FontSize": "12px"}),
+                        dbc.Switch(id="crosshair", value=True, label="Crosshair", className="mb-2"),
 
+                        # Slice slider (hidden unless stack)
+                        html.Div(id="slice-container", children=[
+                            html.Label("Slice", className="me-2"),
+                            dcc.Slider(id="slice-index", min=0, max=0, step=1, value=0),
+                            html.Div(id="slice-info", className="text-muted", style={"fontSize": "12px"}),
+                        ], style={"display": "none"}),
+                    html.Div(id="roi-hint", className="text-muted", style={"fontSize": "12px"}),
+
+                    # ROI stats inside the display accordion
                     dbc.Card([
                         dbc.CardHeader("ROI Stats"),
                         dbc.CardBody([
@@ -65,7 +76,6 @@ layout = dbc.Container([
                         ])
                     ], className="mb-3"),
 
-                    # Colormap
                     dcc.Dropdown(
                         id="colormap",
                         options=[
@@ -82,7 +92,6 @@ layout = dbc.Container([
                         className="mb-2"
                     ),
 
-                    # Colorbar toggle
                     dcc.Checklist(
                         id="show-colorbar",
                         options=[{"label": "Show colorbar", "value": "on"}],
@@ -90,35 +99,84 @@ layout = dbc.Container([
                         className="mb-2"
                     ),
 
-                    html.Div(
-                        id="downsample-note",
-                        className="text-muted",
-                        style={"fontSize": "12px"}
-                    ),
-                ])
-            ], className="mb-3"),
+                    html.Div(id="downsample-note", className="text-muted", style={"fontSize": "12px"}),
+                ], title="Display"),
 
-            # === Metadata ===
-            dbc.Card([
-                dbc.CardHeader("Image Info"),
-                dbc.CardBody([html.Div(id="meta")])
-            ], className="mb-3"),
+                dbc.AccordionItem([html.Div(id="meta")], title="Image Info"),
 
-            # === Histogram ===
-            dbc.Card([
-                dbc.CardHeader("Histogram"),
-                dbc.CardBody([
-                    dcc.Graph(id="hist-view", style={"height": "25vh"})
-                ])
-            ], className="mb-3"),
+                dbc.AccordionItem([dcc.Graph(id="hist-view", style={"height": "25vh"})], title="Histogram"),
 
-            # === Hover Probe ===
-            dbc.Card([
-                dbc.CardHeader("Hover Probe"),
-                dbc.CardBody([
-                    html.Pre(id="hover-readout", style={"fontSize": "12px"})
-                ])
-            ]),
+                dbc.AccordionItem([html.Pre(id="hover-readout", style={"fontSize": "12px"})], title="Hover Probe"),
+                dbc.AccordionItem([
+                    html.Div([
+                        html.Label("Search Processors"),
+                        dcc.Input(id="proc-search", type="text", placeholder="Search by name or tag...", style={"width": "100%"}),
+                        html.Br(),
+                        html.Label("Category Filter"),
+                        dcc.Dropdown(
+                            id="proc-category",
+                            options=[],  # Will be populated by callback
+                            placeholder="All categories",
+                            clearable=True,
+                        ),
+                        html.Br(),
+                        html.Label("Processor"),
+                        dcc.Dropdown(
+                            id="proc-select",
+                            options=[],  # Will be populated by callback
+                            placeholder="Select a processor...",
+                            clearable=False,
+                        ),
+                        html.Div(id="proc-description", className="text-muted", style={"fontSize": "11px", "fontStyle": "italic"}),
+                        html.Br(),
+                        html.Div(id="proc-params"),  # Dynamic parameter inputs
+                        html.Br(),
+                        html.Div([
+                            html.Label("Tile size (H x W)"),
+                            dcc.Input(id="tile-h", type="number", value=512, style={"width": "100px"}),
+                            dcc.Input(id="tile-w", type="number", value=512, style={"width": "100px", "marginLeft": "8px"}),
+                        ]),
+                        html.Br(),
+                        html.Div([
+                            html.Label("Overlap (H x W)"),
+                            dcc.Input(id="overlap-h", type="number", value=16, style={"width": "100px"}),
+                            dcc.Input(id="overlap-w", type="number", value=16, style={"width": "100px", "marginLeft": "8px"}),
+                        ]),
+                        html.Br(),
+                        html.Div([
+                            html.Label("Workers"),
+                            dcc.Input(id="workers", type="number", value=4, style={"width": "80px"}),
+                        ]),
+                        html.Br(),
+                        dbc.Button("Add Node", id="add-node", color="secondary", size="sm", className="me-2"),
+                        dbc.Button("Run Pipeline", id="run-pipeline", color="primary", size="sm"),
+                        dbc.Button("Clear Pipeline", id="clear-pipeline", color="warning", size="sm", className="ms-2"),
+                        html.Hr(),
+                        html.Div(id="pipeline-nodes", style={"fontSize": "12px"}),
+                        html.Br(),
+                        html.Div(id="node-editor", children=[]),
+                        html.Br(),
+                        html.Label("History Navigation"),
+                        html.Div([
+                            dbc.Button("◀", id="history-prev", size="sm", className="me-1"),
+                            dbc.Button("▶", id="history-next", size="sm", className="me-2"),
+                            html.Span(id="history-info", className="text-muted", style={"fontSize": "12px"}),
+                        ]),
+                        dcc.Dropdown(id="history-select", placeholder="Jump to stage...", style={"marginTop": "8px"}),
+                        html.Br(),
+                        dbc.Progress(id="process-progress", value=0, style={"height": "20px"}),
+                        html.Div(id="process-status", className="text-muted", style={"fontSize": "12px"}),
+                        html.Hr(),
+                        html.Label("Save Results"),
+                        dcc.Input(id="save-filename", type="text", placeholder="output.tif", style={"width": "100%"}),
+                        html.Br(),
+                        dbc.Button("Save Image", id="save-btn", color="success", size="sm", className="mt-2"),
+                        html.Div(id="save-status", className="text-muted", style={"fontSize": "12px", "marginTop": "8px"}),
+                        dcc.Download(id="download-data"),
+                        dcc.Interval(id="process-interval", interval=1000, n_intervals=0, disabled=True),
+                    ])
+                ], title="Processing"),
+            ], start_collapsed=True),
 
         ], width=3)
     ], className="mt-3"),

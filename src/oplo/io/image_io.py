@@ -5,6 +5,14 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict, List
 
 import numpy as np
+import logging
+
+logger = logging.getLogger("oplo.io.image_io")
+if not logger.handlers:
+    h = logging.StreamHandler()
+    h.setFormatter(logging.Formatter("[oplo.io.image_io] %(message)s"))
+    logger.addHandler(h)
+    logger.setLevel(logging.INFO)
 
 # ---------------------------------------------------------------------------
 # ImageBundle: preserve raw data + metadata + calibration. Visualization-only
@@ -26,6 +34,54 @@ class ImageBundle:
     data: np.ndarray            # raw array (original dtype when feasible)
     meta: Dict                  # metadata dict (derived from ImageMeta)
     calib: Dict                 # calibration / scaling hints (per modality)
+
+    def is_stack(self) -> bool:
+        """Return True if this bundle represents a stack (multiple slices).
+
+        Heuristic:
+        - If data.ndim == 3 and the last axis is not a small channel axis (1..4),
+          treat axis 0 as Z (Z,H,W).
+        - If data.ndim == 4 and the last axis is channels (3 or 4), treat axis 0
+          as Z (Z,H,W,C).
+        """
+        d = self.data
+        if d is None:
+            return False
+        if d.ndim == 3:
+            # could be H,W,C or Z,H,W
+            if d.shape[2] in (1, 2, 3, 4):
+                return False
+            return True
+        if d.ndim == 4:
+            # assume Z,H,W,C
+            return True
+        return False
+
+    def num_slices(self) -> int:
+        if not self.is_stack():
+            return 1
+        return int(self.data.shape[0])
+
+    def get_slice(self, idx: int) -> np.ndarray:
+        """Return the raw slice at index `idx` as a numpy array.
+        The returned slice will be 2D (H,W) or 3D (H,W,C).
+        """
+        if not self.is_stack():
+            return self.data
+        idx = int(idx)
+        d = self.data
+        if d.ndim == 3:
+            return d[idx]
+        if d.ndim == 4:
+            return d[idx]
+        raise IndexError("Unsupported data shape for slicing")
+
+    def view_slice(self, idx: int, **kwargs) -> np.ndarray:
+        """Return a visualization-ready float32 [0,1] array for a given slice.
+        Calls through to to_unit_view with the bundle meta/calib.
+        """
+        sl = self.get_slice(idx)
+        return to_unit_view(sl, self.meta, self.calib, **kwargs)
 
     def view(
         self,
@@ -62,13 +118,63 @@ def load_image(path: str | Path) -> ImageBundle:
     """
     p = Path(path)
 
+    # Prefer readers registered via the app registry when available. This
+    # allows plugins to register new readers without editing this module.
+    try:
+        from oplo.registry import registry
+
+        # First try a direct finder for this path (fast and deterministic).
+        try:
+            reader = registry.find_reader_for_path(p)
+            if reader is not None:
+                try:
+                    arr, meta = reader.load(p)
+                    meta.reader = getattr(reader, "name", getattr(reader, "__name__", "unknown"))
+                    return ImageBundle(data=arr, meta=meta.__dict__, calib={})
+                except Exception:
+                    # If the chosen reader failed, fall through to trying others
+                    # below so we can still attempt to read the file.
+                    pass
+        except Exception:
+            # ignore finder failures and continue to scanning readers
+            pass
+
+        # Ensure plugins package is imported (best-effort) so third-party
+        # modules have a chance to register themselves with the registry.
+        try:
+            import importlib
+
+            importlib.import_module("oplo.plugins")
+        except Exception:
+            pass
+
+        for reader in registry.get_readers():
+            try:
+                name = getattr(reader, "name", getattr(reader, "__name__", str(reader)))
+                if reader.accepts(p):
+                    logger.info(f"reader {name} accepts path {p}; attempting load")
+                    arr, meta = reader.load(p)
+                    meta.reader = name
+                    return ImageBundle(data=arr, meta=meta.__dict__, calib={})
+            except ImportError as e:
+                # Helpful message when optional deps missing
+                logger.warning(f"reader {name} could not be used (missing dependency): {e}")
+                continue
+            except Exception as e:
+                logger.exception(f"reader {name} failed while loading {p}: {e}")
+                continue
+    except Exception:
+        # If registry import/lookup fails entirely, fall back to local list below.
+        pass
+
+    # Fallback behavior: try the built-in reader ordering (legacy).
     for reader in _READERS:
         if reader.accepts(p):
             arr, meta = reader.load(p)
-            meta.reader = reader.name
+            meta.reader = getattr(reader, "name", getattr(reader, "__name__", "unknown"))
             return ImageBundle(data=arr, meta=meta.__dict__, calib={})
 
-    # Fallback to Pillow explicitly if none matched (shouldn’t normally happen)
+    # As last resort, defer to Pillow loader which is generally available.
     arr, meta = _PillowReader.load(p)
     meta.reader = _PillowReader.name
     return ImageBundle(data=arr, meta=meta.__dict__, calib={})
@@ -105,9 +211,8 @@ class _TiffReader:
             colorspace="linear",
             shape=tuple(arr.shape),
         )
-        # If this is a stack, just expose first page for now (viewer roadmap will add stacks)
-        if arr.ndim == 3 and arr.shape[-1] not in (1, 2, 3, 4):
-            arr = np.asarray(arr[0])
+        # Preserve stacks: do not collapse 3D stacks here. Viewer logic will
+        # inspect ImageBundle.is_stack() and render slices as needed.
         return np.asarray(arr), meta
 
 
@@ -148,7 +253,27 @@ class _DicomReader:
 
     @staticmethod
     def load(p: Path) -> tuple[np.ndarray, ImageMeta]:
-        raise NotImplementedError("DICOM reader not implemented yet")
+        # Try to use pydicom if it is available in the environment. This
+        # provides a basic fallback even if an external plugin didn't register
+        # properly. For full-featured DICOM support, install pydicom or use the
+        # dedicated plugin.
+        try:
+            import pydicom
+        except Exception:
+            raise NotImplementedError("DICOM reader not implemented yet; install pydicom or enable a plugin")
+
+        ds = pydicom.dcmread(str(p))
+        if not hasattr(ds, "pixel_array"):
+            raise ValueError("DICOM file does not contain pixel data")
+        arr = np.asarray(ds.pixel_array)
+        meta = ImageMeta(
+            path=str(p),
+            orig_dtype=str(arr.dtype),
+            bit_depth=int(arr.dtype.itemsize * 8) if arr.dtype.kind in "ui" else 32,
+            colorspace="mono" if arr.ndim == 2 else "rgb",
+            shape=tuple(arr.shape),
+        )
+        return arr, meta
 
 
 class _RawReader:
@@ -211,7 +336,10 @@ class _Hdf5Reader:
         raise NotImplementedError("HDF5 reader not implemented yet")
 
 
-# Reader registration order: working + specific first
+# Register built-in readers with the global registry so third-party plugins
+# can extend or override behaviour. If registry isn't available at import
+# time we preserve a local _READERS fallback for robustness.
+# Always expose a builtin readers list for fallback usage.
 _READERS: List[object] = [
     _TiffReader,
     _PillowReader,   # allow PNG/JPEG/BMP when TIFF not matched
@@ -222,6 +350,20 @@ _READERS: List[object] = [
     _NpyReader,
     _Hdf5Reader,
 ]
+try:
+    from oplo.registry import registry
+
+    registry.register_reader(_TiffReader, priority=50)
+    registry.register_reader(_PillowReader, priority=60)
+    registry.register_reader(_DicomReader, priority=200)
+    registry.register_reader(_RawReader, priority=210)
+    registry.register_reader(_FitsReader, priority=220)
+    registry.register_reader(_ExrReader, priority=230)
+    registry.register_reader(_NpyReader, priority=240)
+    registry.register_reader(_Hdf5Reader, priority=250)
+except Exception:
+    # registry unavailable; builtin _READERS already defined above
+    pass
 
 
 # --------------------------- View scaling ----------------------------------

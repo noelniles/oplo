@@ -20,6 +20,7 @@ def layout():  # called by server
             dbc.NavbarBrand("Oplo", className="ms-2"),
             dbc.Nav([
                 dbc.NavItem(dbc.NavLink("Viewer", href="/")),
+                dbc.NavItem(dbc.NavLink("Browse", href="/browse")),
                 # Future pages:
                 # dbc.NavItem(dbc.NavLink("Batch", href="/batch")),
                 # dbc.NavItem(dbc.NavLink("Metadata", href="/meta")),

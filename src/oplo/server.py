@@ -4,6 +4,7 @@ import dash
 import dash_bootstrap_components as dbc
 from .router import layout
 from oplo.pages.viewer_callbacks import register as register_viewer_callbacks
+from oplo.pages.browser_callbacks import register as register_browser_callbacks
 
 
 def build_app():
@@ -27,6 +28,7 @@ def build_app():
     app.layout = layout()
 
     register_viewer_callbacks(app)
+    register_browser_callbacks(app)
 
     return app
 
