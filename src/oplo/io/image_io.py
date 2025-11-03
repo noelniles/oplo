@@ -64,14 +64,14 @@ def load_image(path: str | Path) -> ImageBundle:
 
     for reader in _READERS:
         if reader.accepts(p):
-            arr, meta = reader.load(p)
+            try:
+                arr, meta = reader.load(p)
+            except NotImplementedError as exc:
+                raise ValueError(f"Support for {p.suffix} is not implemented yet (reader: {reader.name}).") from exc
             meta.reader = reader.name
             return ImageBundle(data=arr, meta=meta.__dict__, calib={})
 
-    # Fallback to Pillow explicitly if none matched (shouldn’t normally happen)
-    arr, meta = _PillowReader.load(p)
-    meta.reader = _PillowReader.name
-    return ImageBundle(data=arr, meta=meta.__dict__, calib={})
+    raise ValueError(f"Unsupported image format: {p.suffix or 'unknown'}")
 
 
 # --------------------------- TIFF (primary) --------------------------------
@@ -248,10 +248,13 @@ def to_unit_view(
 
     if policy == "percentile":
         x32 = x.astype(np.float32, copy=False)
-        lo_v = float(np.percentile(x32, lo))
-        hi_v = float(np.percentile(x32, hi))
-        denom = max(hi_v - lo_v, 1e-12)
-        y = (x32 - lo_v) / denom
+        if np.all(np.isnan(x32)):
+            y = np.zeros_like(x32, dtype=np.float32)
+        else:
+            lo_v = float(np.nanpercentile(x32, lo))
+            hi_v = float(np.nanpercentile(x32, hi))
+            denom = max(hi_v - lo_v, 1e-12)
+            y = (x32 - lo_v) / denom
 
     elif policy == "window":
         wc = window_center if window_center is not None else calib.get("window_center")
@@ -272,9 +275,12 @@ def to_unit_view(
             y = x.astype(np.float32) / float(np.iinfo(x.dtype).max)
         else:
             x32 = x.astype(np.float32, copy=False)
-            x_min = float(np.nanmin(x32))
-            x_max = float(np.nanmax(x32))
-            y = (x32 - x_min) / max(x_max - x_min, 1e-12)
+            if np.all(np.isnan(x32)):
+                y = np.zeros_like(x32, dtype=np.float32)
+            else:
+                x_min = float(np.nanmin(x32))
+                x_max = float(np.nanmax(x32))
+                y = (x32 - x_min) / max(x_max - x_min, 1e-12)
 
     y = np.clip(y, 0, 1)
     if gamma != 1.0:
